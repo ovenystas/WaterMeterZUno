@@ -8,8 +8,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+    - name: Git checkout
     - uses: actions/checkout@v1
-    - name: Build all example sketches
-      uses: Legion2/arduino-builder-action@v2.0.0
+    - name: Build sketch
+      uses: Legion2/arduino-builder-action@v2.0
       with:
         board: "Z-Uno:zw8051:zuno:Frequency=Eu,Security=Off,MuliCommand=Off,LogOutput=Off,NVMClean=Off"
+        sketch: WaterMeterZUno.ino
+

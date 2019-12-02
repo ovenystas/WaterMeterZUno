@@ -2,7 +2,7 @@
  * This is a simple 2 channel meter example
  * (c) Z-Wave.Me 2016
  * 
- * Changed to single channel and changed crc algorithm
+ * Changed to triple channel and changed crc algorithm
  * by Ove Nystas 2018-2019
  */
  
