@@ -1,9 +1,7 @@
 /*
- * This is a simple 2 channel meter example
- * (c) Z-Wave.Me 2016
+ * This is a simple 3 channel water consumption and meter and temperature sensor
  * 
- * Changed to triple channel and changed crc algorithm
- * by Ove Nystas 2018-2019
+ * Ove Nystas 2019
  */
  
 #include <EEPROM.h>
@@ -17,7 +15,7 @@
 #define ZUNO_CHANNEL_WATER_FLOW 2
 #define ZUNO_CHANNEL_WATER_TEMPERATURE 3
 
-#define PIN_SENSOR 0
+#define PIN_SENSOR 17 // Is also INT0
 #define PIN_DS18B20 11
 
 #define EEPROM_ADDR 0x800
@@ -37,7 +35,7 @@
 #define DIV_ROUND_CLOSEST(n, d) ((((n) < 0) ^ ((d) < 0)) ? (((n) - (d)/2)/(d)) : (((n) + (d)/2)/(d)))
 
 
-typedef struct meter_data
+typedef struct MeterData_s
 {
   uint32_t ticks;
   uint8_t  crc8;
@@ -46,6 +44,7 @@ typedef struct meter_data
 
 // Variables for water meter
 MeterData_t meter_data = {0};
+uint32_t new_pulse_ms = 0;
 uint32_t last_update_ms = 0;
 bool new_meter_data = false;
 bool triggered = false;
@@ -67,8 +66,8 @@ uint32_t last_run_temp_ms = 0;
 
 // Configure Z-Uno
 ZUNO_SETUP_DEBUG_MODE(DEBUG_ON);
-
 ZUNO_SETUP_SLEEPING_MODE(ZUNO_SLEEPING_MODE_ALWAYS_AWAKE);
+ZUNO_SETUP_ISR_INT0(int0_handler);
 
 // Sensor multilevel type for water flow is not yet defined in Z-uno but defined in spec v9.
 // Unit: Liter per hour (l/h)
@@ -103,49 +102,41 @@ ZUNO_SETUP_CHANNELS(
 );
 
 
-// For some cases use UART (Serial0/Serial1)
-// It's a most comfortable way for debugging
-// By default we use built-in USB CDC (Serial)
-#define SERIAL Serial
+void int0_handler() {
+  new_pulse_ms = millis();
+  triggered = true;
+}
 
 
 void setup()
 {
   // Setup serial port. Wait for input in 10 seconds.
-  //byte tmp;
-  SERIAL.begin(115200);
-  //SERIAL.setTimeout(10000);
-  //size_t bytesRead = SERIAL.readBytes(&tmp, 1);
+  Serial.begin(115200);
   delay(10000);
 
   meterSetup();
   tempSetup();
 
-//  if (bytesRead > 0)
-//  {
-    printVersion();
-    printNodeId();
-    printTempSensorAddress();
-//  }
-//  else
-//  {
-//    SERIAL.println("Timeout");
-//  }
+  printVersion();
+  printNodeId();
+  printTempSensorAddress();
 }
 
 
 void loop()
 {
-  meterCheck();
+  if (triggered)
+  {
+    meterCheck();
+  }
   meterEepromUpdate();
-
   tempCheck();
 }
 
 
 void printVersion(void)
 {
-  SERIAL.println(__FILE__ " v" VERSION ", " __DATE__ ", " __TIME__);
+  Serial.println(__FILE__ " v" VERSION ", " __DATE__ ", " __TIME__);
 }
 
 void printNodeId(void)
@@ -154,12 +145,12 @@ void printNodeId(void)
 
   if (node_id == 0)
   {
-    SERIAL.println("WARN: Not included in any Z-Wave network");
+    Serial.println("WARN: Not included in any Z-Wave network");
   }
   else
   {
-    SERIAL.print("Z-Wave NodeId: ");
-    SERIAL.println(node_id);
+    Serial.print("Z-Wave NodeId: ");
+    Serial.println(node_id);
   }
 }
 
@@ -167,35 +158,35 @@ void printTempSensorAddress(void)
 {
   if (temp_sensor_found)
   {
-    SERIAL.print("DS18B20 address: ");
+    Serial.print("DS18B20 address: ");
     printHex(addr1, sizeof(addr1));
-    SERIAL.println();
+    Serial.println();
   }
   else
   {
-    SERIAL.println("ERROR: DS18B20 sensor not found");
+    Serial.println("ERROR: DS18B20 sensor not found");
   }
 }
 
 void printMeterData(void)
 {
-  SERIAL.print("Meter data: ticks=");
-  SERIAL.print(meter_data.ticks);
-  SERIAL.print(", crc=");
+  Serial.print("Meter data: ticks=");
+  Serial.print(meter_data.ticks);
+  Serial.print(", crc=");
   printHex(&meter_data.crc8, 1);
 }
 
 // Prints 8-bit data in hex with leading zeroes
-void printHex(uint8_t* data_p, uint8_t length)
+void printHex(uint8_t* data_p, size_t length)
 {
-  for (uint8_t i = 0; i < length; i++)
+  for (size_t i = 0; i < length; i++)
   {
     if (data_p[i] < 0x10)
     {
-      SERIAL.print('0');
+      Serial.print('0');
     }
-    SERIAL.print(data_p[i], HEX);
-    SERIAL.print(' ');
+    Serial.print(data_p[i], HEX);
+    Serial.print(' ');
   }
 }
 
@@ -211,10 +202,10 @@ void meterSetup(void)
   printMeterData();
 
   // Check data  
-  if (crc_calc((uint8_t*)&meter_data.ticks, sizeof(meter_data.ticks)) != meter_data.crc8)
+  if (crc_calc((uint8_t*)&meter_data.ticks, sizeof(meter_data) - 1) != meter_data.crc8)
   {
     // Invalid data - reset all
-    SERIAL.println("Bad eeprom crc8 - init meter data");
+    Serial.println("Bad eeprom crc8 - init meter data");
     meter_data.ticks = 0;
     updateMeterData();
   }
@@ -229,51 +220,34 @@ void tempSetup(void)
 // TODO: Change to interrupt for meter sensor pin
 void meterCheck(void)
 {
-  if ((millis() - last_run_meter_ms) < METER_CHECK_INTERVAL_MS)
-  {
-    return;
-  }
-
-  last_run_meter_ms = millis();
-
-  if (digitalRead(PIN_SENSOR) == LOW)
-  {
-    if (!triggered)
-    {
-      triggered = true;
-
-      // Calculate water flow in l/h
-      uint32_t new_pulse_ms = millis();
-      if (last_pulse_ms > 0)
-      {
-        uint32_t dt_ms = new_pulse_ms - last_pulse_ms;
-        water_flow_lph = (uint16_t)((TICK_VALUE * MS_PER_HOUR) / dt_ms);
-        SERIAL.print("Water flow: ");
-        SERIAL.print(water_flow_lph);
-        SERIAL.println(" l/h");
-        if ((millis() - last_water_flow_report_ms) >= SENSOR_MULTILEVEL_REPORT_INTERVAL)
-        {
-          last_water_flow_report_ms = millis();
-          zunoSendReport(ZUNO_CHANNEL_WATER_FLOW);
-          SERIAL.println("Water flow report sent");
-        }
-      }
-      last_pulse_ms = new_pulse_ms;
-
-      // Add tick to water meter
-      meter_data.ticks++;
-      new_meter_data = true;
-      SERIAL.print("Water meter: ");
-      SERIAL.print(meter_data.ticks * TICK_VALUE);
-      SERIAL.println(" l");
-      zunoSendReport(ZUNO_CHANNEL_WATER_METER);
-      SERIAL.println("Water meter report sent");
-    }
-  }
-  else
-  {
     triggered = false;
-  }
+
+    // Calculate water flow in l/h
+    if (last_pulse_ms > 0)
+    {
+      uint32_t dt_ms = new_pulse_ms - last_pulse_ms;
+      water_flow_lph = (uint16_t)((TICK_VALUE * MS_PER_HOUR) / dt_ms);
+      Serial.print("Water flow: ");
+      Serial.print(water_flow_lph);
+      Serial.println(" l/h");
+
+      if ((millis() - last_water_flow_report_ms) >= SENSOR_MULTILEVEL_REPORT_INTERVAL)
+      {
+        last_water_flow_report_ms = millis();
+        zunoSendReport(ZUNO_CHANNEL_WATER_FLOW);
+        Serial.println("Water flow report sent");
+      }
+    }
+    last_pulse_ms = new_pulse_ms;
+
+    // Add tick to water meter
+    meter_data.ticks++;
+    new_meter_data = true;
+    Serial.print("Water meter: ");
+    Serial.print(meter_data.ticks * TICK_VALUE);
+    Serial.println(" l");
+    Serial.println("Sending water meter report");
+    zunoSendReport(ZUNO_CHANNEL_WATER_METER);
 }
 
 void meterEepromUpdate(void)
@@ -286,7 +260,7 @@ void meterEepromUpdate(void)
 
     updateMeterData();
     new_meter_data = false;
-    SERIAL.println("EEPROM updated");
+    Serial.println("EEPROM updated");
   }
 }
 
@@ -304,27 +278,27 @@ void tempCheck(void)
   {
     water_temperature = DIV_ROUND_CLOSEST(tempC100, 10);
 
-    SERIAL.print("TempC100: ");
-    SERIAL.print(tempC100);
-    SERIAL.print(", Temp: ");
-    SERIAL.println(water_temperature);
+    Serial.print("TempC100: ");
+    Serial.print(tempC100);
+    Serial.print(", Temp: ");
+    Serial.println(water_temperature);
 
     if (abs(water_temperature - temp_reported) >= TEMP_DIFF_REPORT)
     {
-      zunoSendReport(ZUNO_CHANNEL_WATER_TEMPERATURE);
       temp_reported = water_temperature;
-      SERIAL.println("Water temperature report sent");
+      Serial.println("Sending water temperature report");
+      zunoSendReport(ZUNO_CHANNEL_WATER_TEMPERATURE);
     }
   }
   else
   {
-    SERIAL.println("ERROR: Invalid temperature");
+    Serial.println("ERROR: Invalid temperature");
   }
 }
 
 void updateMeterData(void)
 { 
-  meter_data.crc8 = crc_calc((uint8_t*)&meter_data.ticks, sizeof(meter_data.ticks));
+  meter_data.crc8 = crc_calc((uint8_t*)&meter_data.ticks, sizeof(meter_data) - 1);
   printMeterData();
   EEPROM.put(EEPROM_ADDR, &meter_data, sizeof(meter_data));
 }
@@ -333,7 +307,7 @@ void resetWaterMeter(void)
 {
   meter_data.ticks = 0;
   updateMeterData();
-  SERIAL.println("Meter was reset");
+  Serial.println("Meter was reset");
 }
 
 dword getWaterMeter(void)

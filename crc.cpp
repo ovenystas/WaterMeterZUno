@@ -34,4 +34,3 @@ uint8_t crc_calc(const uint8_t *data, size_t len)
 #ifdef __cplusplus
 }
 #endif
-
