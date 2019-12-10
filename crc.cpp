@@ -1,4 +1,3 @@
-#include <Arduino.h>
 #include "crc.h"
 
 #ifdef __cplusplus

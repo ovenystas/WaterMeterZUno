@@ -13,4 +13,6 @@
  * CRC of the string "123456789" is 0x52
  */
 
+#include <Arduino.h>
+
 uint8_t crc_calc(const uint8_t *data, size_t len);

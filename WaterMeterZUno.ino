@@ -7,6 +7,7 @@
 #include <EEPROM.h>
 #include <ZUNO_DS18B20.h>
 #include "crc.h"
+#include "Sensor.h"
 
 #define VERSION "0.01"
 
@@ -24,8 +25,11 @@
 #define TICK_VALUE 1 // in liters
 
 #define METER_CHECK_INTERVAL_MS 100
-#define TEMP_CHECK_INTERVAL_MS 30000
-#define SENSOR_MULTILEVEL_REPORT_INTERVAL 30000
+#define TEMPERATURE_MEASURE_INTERVAL_S 30
+#define TEMPERATURE_REPORT_INTERVAL_S 30
+#define TEMPERATURE_REPORT_INTERVAL_MIN_S (SENSOR_MULTILEVEL_REPORT_INTERVAL_MS / 1000)
+
+#define SENSOR_MULTILEVEL_REPORT_INTERVAL_MS 30000
 
 // TODO: Make this a Z-Wave configurable parameter
 #define TEMP_DIFF_REPORT 2 // In degree * 10
@@ -40,7 +44,6 @@ typedef struct MeterData_s
   uint32_t ticks;
   uint8_t  crc8;
 } MeterData_t;
-
 
 // Variables for water meter
 MeterData_t meter_data = {0};
@@ -59,10 +62,17 @@ uint32_t last_water_flow_report_ms = 0;
 OneWire ow(PIN_DS18B20);
 DS18B20Sensor ds18b20(&ow);
 byte addr1[8] = {0xFF};
-int water_temperature;
-int temp_reported;
 bool temp_sensor_found = false;
-uint32_t last_run_temp_ms = 0;
+struct Sensor_s sensor_temperature =
+{
+  ZUNO_CHANNEL_WATER_TEMPERATURE,
+  TEMPERATURE_MEASURE_INTERVAL_S,
+  TEMPERATURE_REPORT_INTERVAL_S,
+  TEMPERATURE_REPORT_INTERVAL_MIN_S,
+  { TEMP_DIFF_REPORT },
+  { 0 } , { 0 },
+  0, 0
+};
 
 // Configure Z-Uno
 ZUNO_SETUP_DEBUG_MODE(DEBUG_ON);
@@ -130,7 +140,37 @@ void loop()
     meterCheck();
   }
   meterEepromUpdate();
-  tempCheck();
+  
+  if (temp_sensor_found)
+  {
+    if (Sensor_isTimeToMeasure(&sensor_temperature))
+    {
+      int16_t tempC10 = tempMeasure();
+   
+      Sensor_setValueS(&sensor_temperature, tempC10);
+      Sensor_setMeasured(&sensor_temperature);
+
+      if (tempC10 == BAD_TEMP)
+      {
+        Serial.println("ERROR: Invalid temperature");
+      }
+      else
+      {
+        Serial.print("TempC10: ");
+        Serial.println(tempC10);
+      }
+    }
+    
+    if (Sensor_isReportIntervalMinReached(&sensor_temperature))
+    {
+      if (Sensor_isReportThresholdReached(&sensor_temperature) ||
+          Sensor_isReportIntervalReached(&sensor_temperature))
+      {
+          Serial.println("Sending water temperature report");
+          Sensor_sendReport(&sensor_temperature);
+      }
+    }
+  }
 }
 
 
@@ -217,7 +257,6 @@ void tempSetup(void)
 }
 
 
-// TODO: Change to interrupt for meter sensor pin
 void meterCheck(void)
 {
     triggered = false;
@@ -231,7 +270,7 @@ void meterCheck(void)
       Serial.print(water_flow_lph);
       Serial.println(" l/h");
 
-      if ((millis() - last_water_flow_report_ms) >= SENSOR_MULTILEVEL_REPORT_INTERVAL)
+      if ((millis() - last_water_flow_report_ms) >= SENSOR_MULTILEVEL_REPORT_INTERVAL_MS)
       {
         last_water_flow_report_ms = millis();
         zunoSendReport(ZUNO_CHANNEL_WATER_FLOW);
@@ -250,6 +289,7 @@ void meterCheck(void)
     zunoSendReport(ZUNO_CHANNEL_WATER_METER);
 }
 
+
 void meterEepromUpdate(void)
 {
   // To save EEPROM from a lot of r/w operation 
@@ -264,36 +304,19 @@ void meterEepromUpdate(void)
   }
 }
 
-void tempCheck(void)
+int16_t tempMeasure(void)
 {
-  if (!temp_sensor_found || (millis() - last_run_temp_ms) < TEMP_CHECK_INTERVAL_MS)
+  int16_t tempC10;
+  int16_t tempC100 = ds18b20.getTempC100(addr1);
+  if (tempC100 == BAD_TEMP)
   {
-    return;
-  }
-
-  last_run_temp_ms = millis();
-
-  int tempC100 = ds18b20.getTempC100(addr1);
-  if (tempC100 != BAD_TEMP)
-  {
-    water_temperature = DIV_ROUND_CLOSEST(tempC100, 10);
-
-    Serial.print("TempC100: ");
-    Serial.print(tempC100);
-    Serial.print(", Temp: ");
-    Serial.println(water_temperature);
-
-    if (abs(water_temperature - temp_reported) >= TEMP_DIFF_REPORT)
-    {
-      temp_reported = water_temperature;
-      Serial.println("Sending water temperature report");
-      zunoSendReport(ZUNO_CHANNEL_WATER_TEMPERATURE);
-    }
+    tempC10 = BAD_TEMP;
   }
   else
   {
-    Serial.println("ERROR: Invalid temperature");
+    tempC10 = DIV_ROUND_CLOSEST(tempC100, 10);
   }
+  return tempC10;
 }
 
 void updateMeterData(void)
@@ -322,5 +345,5 @@ word getWaterFlow(void)
 
 word getWaterTemperature(void)
 {
-  return water_temperature;
+  return sensor_temperature.value.s16;
 }
