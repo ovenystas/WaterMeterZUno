@@ -1,10 +1,4 @@
-#include "crc.h"
-
-#ifdef __cplusplus
-extern "C"
-{
-#endif
-
+#include "Crc.h"
 
 uint8_t crc_calc(const uint8_t *data, size_t len)
 {
@@ -29,7 +23,3 @@ uint8_t crc_calc(const uint8_t *data, size_t len)
 
   return crc;
 }
-
-#ifdef __cplusplus
-}
-#endif
