@@ -61,7 +61,25 @@ typedef enum
 {
   ERROR_NONE = 0,
   ERROR_INT_NOT_HANDLED_IN_TIME,
-} Error_t;
+  ERROR_INVALID_PARAMETER_NUMBER,
+} Error_E;
+
+typedef enum
+{
+  PARAM_BASE = 64,
+  PARAM_METER_REPORT_INTERVAL_ms = 0,
+  PARAM_METER_DIFF_REPORT_l,
+  PARAM_FLOW_REPORT_INTERVAL_ms,
+  PARAM_FLOW_DIFF_REPORT_lph,
+  PARAM_TEMPERATURE_MEASURE_INTERVAL_ms,
+  PARAM_TEMPERATURE_REPORT_INTERVAL_ms,
+  PARAM_TEMPERATURE_DIFF_REPORT_dC,
+  PARAM_METER_SET_VALUE_HIGH,
+  PARAM_METER_SET_VALUE_LOW,
+  PARAM_LENGTH,
+  PARAM_MAX = 96,
+} Parameter_E;
+
 
 // -----------------------------------------------------------------------------
 // Struct definitions and typedefs
@@ -70,14 +88,14 @@ typedef struct MeterData_s
 {
   uint32_t ticks;
   uint8_t  crc8;
-} MeterData_t;
+} MeterData_T;
 
 
 // -----------------------------------------------------------------------------
 // Variables
 // -----------------------------------------------------------------------------
 // Error handling
-Error_t g_error = ERROR_NONE;
+Error_E g_error = ERROR_NONE;
 uint16_t g_error_count = 0;
 
 
@@ -85,7 +103,7 @@ uint16_t g_error_count = 0;
 uint32_t g_new_pulse_ms = 0;
 bool g_new_meter_data = false;
 bool g_pulse_sensor_triggered = false;
-Sensor_t sensor_meter =
+Sensor_T sensor_meter =
 {
   ZUNO_CHANNEL_WATER_METER,
   METER_MEASURE_INTERVAL_ms,
@@ -98,7 +116,7 @@ Sensor_t sensor_meter =
 
 
 // Water flow
-Sensor_t sensor_flow =
+Sensor_T sensor_flow =
 {
   ZUNO_CHANNEL_WATER_FLOW,
   FLOW_MEASURE_INTERVAL_ms,
@@ -115,7 +133,7 @@ OneWire ow(PIN_DS18B20);
 DS18B20Sensor ds18b20(&ow);
 byte addr1[8] = {0xFF};
 bool g_temperature_sensor_found = false;
-Sensor_t sensor_temperature =
+Sensor_T sensor_temperature =
 {
   ZUNO_CHANNEL_WATER_TEMPERATURE,
   TEMPERATURE_MEASURE_INTERVAL_ms,
@@ -131,12 +149,19 @@ Sensor_t sensor_temperature =
 uint32_t g_last_update_ms = 0;
 
 
+// Parameters
+uint16_t parameter[PARAM_LENGTH];
+
+
 // -----------------------------------------------------------------------------
 // Z-Uno configuration
 // -----------------------------------------------------------------------------
+//ZUNO_SETUP_PRODUCT_ID(0xAA, 0xBB); // To set 0x0111 / 0xAABB
+
 ZUNO_SETUP_DEBUG_MODE(DEBUG_ON);
 ZUNO_SETUP_SLEEPING_MODE(ZUNO_SLEEPING_MODE_ALWAYS_AWAKE);
 ZUNO_SETUP_ISR_INT0(int0_handler);
+ZUNO_SETUP_CFGPARAMETER_HANDLER(config_parameter_changed);
 
 // Sensor multilevel type for water flow is not yet defined in Z-uno but defined
 // in spec v9.
@@ -196,6 +221,7 @@ void setup()
   Serial.begin(115200);
   delay(10000);
 
+  parameterSetup();
   meterSetup();
   temperatureSetup();
 
@@ -208,6 +234,16 @@ void setup()
 // -----------------------------------------------------------------------------
 // Setup functions
 // -----------------------------------------------------------------------------
+void parameterSetup(void)
+{
+  // Load all Z-Wave device parameters from EEPROM
+  for (uint8_t i = 0; i < PARAM_LENGTH; i++)
+  {
+    parameter[i] = zunoLoadCFGParam(PARAM_BASE + 1);
+  }
+}
+
+
 void meterSetup(void)
 {
   // Dry contacts of meters connect to these pins
@@ -215,7 +251,7 @@ void meterSetup(void)
   zunoExtIntMode(ZUNO_EXT_INT0, FALLING);
 
   // Get last meter values from EEPROM
-  MeterData_t meter_data;
+  MeterData_T meter_data;
   EEPROM.get(EEPROM_ADDR, &meter_data, sizeof(meter_data));
   printMeterData(&meter_data);
 
@@ -293,14 +329,15 @@ void errorCheck(void)
   switch (g_error)
   {
     case ERROR_INT_NOT_HANDLED_IN_TIME:
-    {
       Serial.println("ERROR: Interrupt not handled in time.");
       break;
-    }
-    default:
-    {
+
+    case ERROR_INVALID_PARAMETER_NUMBER:
+      Serial.println("ERROR: Invalid parameter number.");
       break;
-    }
+
+    default:
+      break;
   }
   
   if (g_error != ERROR_NONE)
@@ -406,7 +443,7 @@ void eepromUpdateCheck(void)
 
 void updateMeterData(uint32_t ticks)
 {
-  MeterData_t meter_data;
+  MeterData_T meter_data;
   meter_data.ticks = ticks;
   meter_data.crc8 = crc_calc((uint8_t*)&meter_data.ticks, sizeof(meter_data) - 1);
   printMeterData(&meter_data);
@@ -454,7 +491,7 @@ void printTempSensorAddress(void)
 }
 
 
-void printMeterData(MeterData_t* md_p)
+void printMeterData(MeterData_T* md_p)
 {
   Serial.print("Meter data: ticks=");
   Serial.print(md_p->ticks);
@@ -496,7 +533,7 @@ void printHex(uint8_t* data_p, size_t length)
 
 
 // -----------------------------------------------------------------------------
-// Getters and setters
+// Z-Uno getters and setters
 // -----------------------------------------------------------------------------
 void resetWaterMeter(void)
 {
@@ -521,4 +558,27 @@ word getWaterFlow(void)
 word getWaterTemperature(void)
 {
   return Sensor_getValueU16(&sensor_temperature); // Unit dC (deci degree Celsius)
+}
+
+
+// -----------------------------------------------------------------------------
+// Z-Uno configuration parameter handler
+// -----------------------------------------------------------------------------
+void config_parameter_changed(uint8_t param, uint16_t value)
+{
+  if (param < PARAM_BASE || param >= (PARAM_BASE + PARAM_LENGTH))
+  {
+    Serial.print("ERROR: Invalid parameter number=");
+    Serial.println(param);
+    g_error = ERROR_INVALID_PARAMETER_NUMBER;
+    return;
+  }
+
+  parameter[param - PARAM_BASE] = value;
+  zunoSaveCFGParam(param, value);
+
+  Serial.print("INFO: Parameter ");
+  Serial.print(param);
+  Serial.print(" changed to ");
+  Serial.println(value);
 }
