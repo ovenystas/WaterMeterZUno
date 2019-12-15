@@ -22,6 +22,20 @@
 // Uncomment to override default parameter values with the values in the defines.
 #define PARAMETER_OVERRIDE
 
+/* Limits of integral types.  */
+/* Minimum of signed integral types.  */
+# define INT8_MIN                (-128)
+# define INT16_MIN                (-32767-1)
+# define INT32_MIN                (-2147483647L-1L)
+/* Maximum of signed integral types.  */
+# define INT8_MAX                (127)
+# define INT16_MAX                (32767)
+# define INT32_MAX                (2147483647L)
+/* Maximum of unsigned integral types.  */
+# define UINT8_MAX                (255)
+# define UINT16_MAX                (65535)
+# define UINT32_MAX                (4294967295UL)
+
 // Z-Uno channels
 #define ZUNO_CHANNEL_WATER_METER 1
 #define ZUNO_CHANNEL_WATER_FLOW 2
@@ -30,7 +44,6 @@
 // Pins
 #define PIN_SENSOR 17 // Is also INT0
 #define PIN_DS18B20 11
-#define PIN_PULSE 18
 
 #define MY_SERIAL Serial0
 
@@ -65,8 +78,8 @@
 #define PARAM_DEFAULT_TEMPERATURE_MEASURE_INTERVAL_s 60
 #define PARAM_DEFAULT_TEMPERATURE_REPORT_INTERVAL_s 900
 #define PARAM_DEFAULT_TEMPERATURE_DIFF_REPORT_dC 5
-#define PARAM_DEFAULT_METER_SET_VALUE_HIGH 0
-#define PARAM_DEFAULT_METER_SET_VALUE_LOW 0
+#define PARAM_DEFAULT_METER_RESET_VALUE_HIGH 0
+#define PARAM_DEFAULT_METER_RESET_VALUE_LOW 0
 
 
 #define MS_PER_HOUR 3600000UL
@@ -93,8 +106,8 @@ typedef enum
   PARAM_TEMPERATURE_MEASURE_INTERVAL_s,
   PARAM_TEMPERATURE_REPORT_INTERVAL_s,
   PARAM_TEMPERATURE_DIFF_REPORT_dC,
-  PARAM_METER_SET_VALUE_HIGH,
-  PARAM_METER_SET_VALUE_LOW,
+  PARAM_METER_RESET_VALUE_HIGH,
+  PARAM_METER_RESET_VALUE_LOW,
   PARAM_LENGTH,
   PARAM_MAX = 96,
 } Parameter_E;
@@ -179,8 +192,8 @@ const uint16_t parameter_default[PARAM_LENGTH] =
   PARAM_DEFAULT_TEMPERATURE_MEASURE_INTERVAL_s,
   PARAM_DEFAULT_TEMPERATURE_REPORT_INTERVAL_s,
   PARAM_DEFAULT_TEMPERATURE_DIFF_REPORT_dC,
-  PARAM_DEFAULT_METER_SET_VALUE_HIGH,
-  PARAM_DEFAULT_METER_SET_VALUE_LOW,
+  PARAM_DEFAULT_METER_RESET_VALUE_HIGH,
+  PARAM_DEFAULT_METER_RESET_VALUE_LOW,
 };
 
 // -----------------------------------------------------------------------------
@@ -238,7 +251,6 @@ void int0_handler()
     g_error = ERROR_INT_NOT_HANDLED_IN_TIME;
   }
   g_pulse_sensor_triggered = true;
-  digitalWrite(PIN_PULSE, digitalRead(PIN_SENSOR));
 }
 
 
@@ -330,6 +342,10 @@ void parameterCommit(void)
 }
 
 
+/*
+ * Setup inductive sensor for reading water meter dial. 
+ * Load previous stored water meter tick value from EEPROM.
+ */
 void meterSetup(void)
 {
   // Dry contacts of meters connect to these pins
@@ -350,6 +366,11 @@ void meterSetup(void)
   }
 }
 
+/*
+ * Setup temperature sensor.
+ * Scan for one sensor on the 1-wire bus and store its address.
+ * Sets global variable g_temperature_sensor_found.
+ */
 void temperatureSetup(void)
 {
   g_temperature_sensor_found = ds18b20.scanAloneSensor(addr1) == 1;
@@ -375,6 +396,10 @@ void loop()
     printWaterFlow(Sensor_getValueU16(&sensor_flow));
 
     g_new_meter_data = true;
+  }
+  else
+  {
+    flowDecay();
   }
 
   if (g_temperature_sensor_found)
@@ -429,6 +454,8 @@ void errorCheck(void)
   if (g_error != ERROR_NONE)
   {
     ++g_error_count;
+    MY_SERIAL.print("INFO: Total number of errors: ");
+    MY_SERIAL.println(g_error_count);
     g_error = ERROR_NONE;
   }
 }
@@ -449,6 +476,19 @@ void flowCheck(uint32_t new_pulse_ms)
   uint16_t flow_lph = flowMeasure(new_pulse_ms, last_pulse_ms);
   Sensor_setValueU(&sensor_flow, flow_lph);
   Sensor_setMeasuredTime(&sensor_flow, new_pulse_ms);
+}
+
+
+void flowDecay(void)
+{
+  uint32_t now_ms = millis();
+  uint32_t last_pulse_ms = Sensor_getMeasuredTime(&sensor_flow);
+  uint16_t flow_lph = flowMeasure(now_ms, last_pulse_ms);
+  if (flow_lph < Sensor_getValueU16(&sensor_flow))
+  {
+    Sensor_setValueU(&sensor_flow, flow_lph);
+    printWaterFlow(Sensor_getValueU16(&sensor_flow));
+  }
 }
 
 
@@ -477,21 +517,29 @@ void temperatureCheck(void)
 // -----------------------------------------------------------------------------
 // Measuring functions
 // -----------------------------------------------------------------------------
+/*
+ * Measure water flow value in liter per hour based on time between last two
+ * pulses.
+ */
 uint16_t flowMeasure(uint32_t new_time, uint32_t last_time)
 {
   // Calculate water flow in l/h
-  uint16_t flow_lph = 0;
+  uint32_t flow_lph = 0;
   
-  if (last_time > 0)
+  if (last_time > 0 && new_time > last_time)
   {
     uint32_t dt_ms = new_time - last_time;
-    flow_lph = (uint16_t)((TICK_VALUE * MS_PER_HOUR) / dt_ms);
+    flow_lph = ((TICK_VALUE * MS_PER_HOUR) / dt_ms);
   }
 
-  return flow_lph;
+  return flow_lph > UINT16_MAX ? UINT16_MAX : (uint16_t)flow_lph;
 }
 
 
+/*
+ * Measure temperature by retreiving value from DS18B20 sensor.
+ * Round value to deci degree Celsius.
+ */
 int16_t temperatureMeasure(void)
 {
   int16_t tempC10;
@@ -527,12 +575,17 @@ void eepromUpdateCheck(void)
 }
 
 
+/*
+ * Calculate CRC on ticks value and store them in EEPROM.
+ */
 void updateMeterData(uint32_t ticks)
 {
   MeterData_T meter_data;
   meter_data.ticks = ticks;
   meter_data.crc8 = crc_calc((uint8_t*)&meter_data.ticks, sizeof(meter_data) - 1);
+
   printMeterData(&meter_data);
+
   EEPROM.put(EEPROM_ADDR, &meter_data, sizeof(meter_data));
 }
 
@@ -617,7 +670,9 @@ void printWaterFlow(uint16_t flow_lph)
 }
 
 
-// Prints 8-bit data in hex with leading zeroes
+/* 
+ * Prints 8-bit data in hex with leading zeroes.
+ */
 void printHex(uint8_t* data_p, size_t length)
 {
   for (size_t i = 0; i < length; i++)
@@ -637,29 +692,29 @@ void printHex(uint8_t* data_p, size_t length)
 // -----------------------------------------------------------------------------
 void resetWaterMeter(void)
 {
-  uint32_t resetValue = (uint32_t)parameter[PARAM_METER_SET_VALUE_HIGH] << 16;
-  resetValue |= (uint32_t)parameter[PARAM_METER_SET_VALUE_LOW];
+  uint32_t resetValue = (uint32_t)parameter[PARAM_METER_RESET_VALUE_HIGH] << 16;
+  resetValue |= (uint32_t)parameter[PARAM_METER_RESET_VALUE_LOW];
 
   Sensor_setValueU(&sensor_meter, resetValue);
   updateMeterData(resetValue);
-  MY_SERIAL.print("Meter was reset to value ");
+  MY_SERIAL.print("INFO: Meter was reset to value ");
   MY_SERIAL.println(resetValue);
 }
 
 
-dword getWaterMeter(void)
+uint32_t getWaterMeter(void)
 {
   return Sensor_getValueU32(&sensor_meter) * TICK_VALUE; // Unit: l (liter)
 }
 
 
-word getWaterFlow(void)
+uint16_t getWaterFlow(void)
 {
   return Sensor_getValueU16(&sensor_flow); // Unit: l/h (liter per hour)
 }
 
 
-word getWaterTemperature(void)
+uint16_t getWaterTemperature(void)
 {
   return Sensor_getValueU16(&sensor_temperature); // Unit dC (deci degree Celsius)
 }
