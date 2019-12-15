@@ -19,6 +19,9 @@
 // -----------------------------------------------------------------------------
 #define VERSION "0.01"
 
+// Uncomment to override default parameter values with the values in the defines.
+#define PARAMETER_OVERRIDE
+
 // Z-Uno channels
 #define ZUNO_CHANNEL_WATER_METER 1
 #define ZUNO_CHANNEL_WATER_FLOW 2
@@ -28,6 +31,8 @@
 #define PIN_SENSOR 17 // Is also INT0
 #define PIN_DS18B20 11
 #define PIN_PULSE 18
+
+#define MY_SERIAL Serial0
 
 #define EEPROM_ADDR 0x800
 #define EEPROM_UPDATE_INTERVAL_ms  120000
@@ -43,7 +48,7 @@
 #define METER_DIFF_REPORT_l 1 // In liters // TODO: Make this a Z-Wave configurable parameter
 
 #define FLOW_MEASURE_INTERVAL_ms 0 // Interrupt based
-#define FLOW_REPORT_INTERVAL_ms 30000  // Default 900
+#define FLOW_REPORT_INTERVAL_ms 30000  // Default 900000
 #define FLOW_REPORT_INTERVAL_MIN_ms SENSOR_MULTILEVEL_REPORT_INTERVAL_MIN_ms
 #define FLOW_DIFF_REPORT_lph 1 // In l/h // TODO: Make this a Z-Wave configurable parameter
 
@@ -52,10 +57,23 @@
 #define TEMPERATURE_REPORT_INTERVAL_MIN_ms SENSOR_MULTILEVEL_REPORT_INTERVAL_MIN_ms
 #define TEMPERATURE_DIFF_REPORT_dC 1 // In deci degrees C // TODO: Make this a Z-Wave configurable parameter
 
+// Parameter default values
+#define PARAM_DEFAULT_METER_REPORT_INTERVAL_s 900
+#define PARAM_DEFAULT_METER_DIFF_REPORT_l 1
+#define PARAM_DEFAULT_FLOW_REPORT_INTERVAL_s 900
+#define PARAM_DEFAULT_FLOW_DIFF_REPORT_lph 1
+#define PARAM_DEFAULT_TEMPERATURE_MEASURE_INTERVAL_s 60
+#define PARAM_DEFAULT_TEMPERATURE_REPORT_INTERVAL_s 900
+#define PARAM_DEFAULT_TEMPERATURE_DIFF_REPORT_dC 5
+#define PARAM_DEFAULT_METER_SET_VALUE_HIGH 0
+#define PARAM_DEFAULT_METER_SET_VALUE_LOW 0
+
+
 #define MS_PER_HOUR 3600000UL
 
 #define DIV_ROUND_CLOSEST(n, d) \
   ((((n) < 0) ^ ((d) < 0)) ? (((n) - (d) / 2) / (d)) : (((n) + (d) / 2) / (d)))
+
 
 typedef enum
 {
@@ -64,15 +82,16 @@ typedef enum
   ERROR_INVALID_PARAMETER_NUMBER,
 } Error_E;
 
+
 typedef enum
 {
   PARAM_BASE = 64,
-  PARAM_METER_REPORT_INTERVAL_ms = 0,
+  PARAM_METER_REPORT_INTERVAL_s = 0,
   PARAM_METER_DIFF_REPORT_l,
-  PARAM_FLOW_REPORT_INTERVAL_ms,
+  PARAM_FLOW_REPORT_INTERVAL_s,
   PARAM_FLOW_DIFF_REPORT_lph,
-  PARAM_TEMPERATURE_MEASURE_INTERVAL_ms,
-  PARAM_TEMPERATURE_REPORT_INTERVAL_ms,
+  PARAM_TEMPERATURE_MEASURE_INTERVAL_s,
+  PARAM_TEMPERATURE_REPORT_INTERVAL_s,
   PARAM_TEMPERATURE_DIFF_REPORT_dC,
   PARAM_METER_SET_VALUE_HIGH,
   PARAM_METER_SET_VALUE_LOW,
@@ -151,7 +170,18 @@ uint32_t g_last_update_ms = 0;
 
 // Parameters
 uint16_t parameter[PARAM_LENGTH];
-
+const uint16_t parameter_default[PARAM_LENGTH] =
+{
+  PARAM_DEFAULT_METER_REPORT_INTERVAL_s,
+  PARAM_DEFAULT_METER_DIFF_REPORT_l,
+  PARAM_DEFAULT_FLOW_REPORT_INTERVAL_s,
+  PARAM_DEFAULT_FLOW_DIFF_REPORT_lph,
+  PARAM_DEFAULT_TEMPERATURE_MEASURE_INTERVAL_s,
+  PARAM_DEFAULT_TEMPERATURE_REPORT_INTERVAL_s,
+  PARAM_DEFAULT_TEMPERATURE_DIFF_REPORT_dC,
+  PARAM_DEFAULT_METER_SET_VALUE_HIGH,
+  PARAM_DEFAULT_METER_SET_VALUE_LOW,
+};
 
 // -----------------------------------------------------------------------------
 // Z-Uno configuration
@@ -218,7 +248,7 @@ void int0_handler()
 void setup()
 {
   // Setup serial port. Wait for input in 10 seconds.
-  Serial.begin(115200);
+  MY_SERIAL.begin(115200);
   delay(10000);
 
   parameterSetup();
@@ -228,19 +258,75 @@ void setup()
   printVersion();
   printNodeId();
   printTempSensorAddress();
+  printParameters();
 }
 
 
 // -----------------------------------------------------------------------------
 // Setup functions
 // -----------------------------------------------------------------------------
+/*
+ * Load all Z-Wave device parameters from EEPROM if in network else load
+ * from default values and also save in EEPROM.
+ */
 void parameterSetup(void)
 {
-  // Load all Z-Wave device parameters from EEPROM
+  bool inNetwork = zunoInNetwork();
+  
+  if (inNetwork)
+  {
+    parameterLoad();
+  }
+  else
+  {
+    parameterSetDefault();
+  }
+
+#ifndef PARAMETER_OVERRIDE
+  parameterCommit();
+#endif
+}
+
+
+/*
+ * Load all parameter values from EEPROM.
+ */
+void parameterLoad(void)
+{
   for (uint8_t i = 0; i < PARAM_LENGTH; i++)
   {
-    parameter[i] = zunoLoadCFGParam(PARAM_BASE + 1);
+    parameter[i] = zunoLoadCFGParam(PARAM_BASE + i);
   }
+}
+
+
+/*
+ * Set all parameter values to default and also save in EEPROM.
+ */
+void parameterSetDefault(void)
+{
+  for (uint8_t i = 0; i < PARAM_LENGTH; i++)
+  {
+    parameter[i] = parameter_default[i];
+    zunoSaveCFGParam(PARAM_BASE + i, parameter[i]);
+  }
+}
+
+
+/*
+ * Commit parameter values to be used with the sensors.
+ */
+void parameterCommit(void)
+{
+  sensor_meter.report_interval_ms = parameter[PARAM_METER_REPORT_INTERVAL_s] * 1000;
+  sensor_meter.report_threshold.u16 = parameter[PARAM_METER_DIFF_REPORT_l];
+
+  sensor_flow.report_interval_ms = parameter[PARAM_FLOW_REPORT_INTERVAL_s] * 1000;
+  sensor_flow.report_threshold.u16 = parameter[PARAM_FLOW_DIFF_REPORT_lph];
+
+  sensor_temperature.measure_interval_ms = parameter[PARAM_TEMPERATURE_MEASURE_INTERVAL_s] * 1000;
+  sensor_temperature.report_interval_ms = parameter[PARAM_TEMPERATURE_REPORT_INTERVAL_s] * 1000;
+  sensor_temperature.report_threshold.u16 = parameter[PARAM_TEMPERATURE_DIFF_REPORT_dC];
 }
 
 
@@ -259,7 +345,7 @@ void meterSetup(void)
   if (crc_calc((uint8_t*)&meter_data.ticks, sizeof(meter_data) - 1) != meter_data.crc8)
   {
     // Invalid data - reset all
-    Serial.println("Bad eeprom crc8 - init meter data");
+    MY_SERIAL.println("Bad eeprom crc8 - init meter data");
     updateMeterData(0);
   }
 }
@@ -303,19 +389,19 @@ void loop()
 
   if (Sensor_isTimeToSendReport(&sensor_meter))
   {
-    Serial.println("Sending water meter report");
+    MY_SERIAL.println("Sending water meter report");
     Sensor_sendReport(&sensor_meter);
   }
 
   if (Sensor_isTimeToSendReport(&sensor_flow))
   {
-    Serial.println("Sending water flow report");
+    MY_SERIAL.println("Sending water flow report");
     Sensor_sendReport(&sensor_flow);
   }
 
   if (Sensor_isTimeToSendReport(&sensor_temperature))
   {
-    Serial.println("Sending water temperature report");
+    MY_SERIAL.println("Sending water temperature report");
     Sensor_sendReport(&sensor_temperature);
   }
 }
@@ -329,11 +415,11 @@ void errorCheck(void)
   switch (g_error)
   {
     case ERROR_INT_NOT_HANDLED_IN_TIME:
-      Serial.println("ERROR: Interrupt not handled in time.");
+      MY_SERIAL.println("ERROR: Interrupt not handled in time.");
       break;
 
     case ERROR_INVALID_PARAMETER_NUMBER:
-      Serial.println("ERROR: Invalid parameter number.");
+      MY_SERIAL.println("ERROR: Invalid parameter number.");
       break;
 
     default:
@@ -377,12 +463,12 @@ void temperatureCheck(void)
 
     if (tempC10 == BAD_TEMP)
     {
-      Serial.println("ERROR: Invalid temperature");
+      MY_SERIAL.println("ERROR: Invalid temperature");
     }
     else
     {
-      Serial.print("TempC10: ");
-      Serial.println(tempC10);
+      MY_SERIAL.print("TempC10: ");
+      MY_SERIAL.println(tempC10);
     }
   }
 }
@@ -436,7 +522,7 @@ void eepromUpdateCheck(void)
 
     uint32_t ticks = Sensor_getValueU32(&sensor_meter);
     updateMeterData(ticks);
-    Serial.println("EEPROM updated");
+    MY_SERIAL.println("EEPROM updated");
   }
 }
 
@@ -456,7 +542,7 @@ void updateMeterData(uint32_t ticks)
 // -----------------------------------------------------------------------------
 void printVersion(void)
 {
-  Serial.println(__FILE__ " v" VERSION ", " __DATE__ ", " __TIME__);
+  MY_SERIAL.println(__FILE__ " v" VERSION ", " __DATE__ ", " __TIME__);
 }
 
 
@@ -466,12 +552,12 @@ void printNodeId(void)
 
   if (node_id != 0)
   {
-    Serial.print("Z-Wave NodeId: ");
-    Serial.println(node_id);
+    MY_SERIAL.print("Z-Wave NodeId: ");
+    MY_SERIAL.println(node_id);
   }
   else
   {
-    Serial.println("WARN: Not included in any Z-Wave network");
+    MY_SERIAL.println("WARN: Not included in any Z-Wave network");
   }
 }
 
@@ -480,40 +566,54 @@ void printTempSensorAddress(void)
 {
   if (g_temperature_sensor_found)
   {
-    Serial.print("DS18B20 address: ");
+    MY_SERIAL.print("DS18B20 address: ");
     printHex(addr1, sizeof(addr1));
-    Serial.println();
+    MY_SERIAL.println();
   }
   else
   {
-    Serial.println("ERROR: DS18B20 sensor not found");
+    MY_SERIAL.println("ERROR: DS18B20 sensor not found");
   }
+}
+
+
+void printParameters(void)
+{
+  MY_SERIAL.print("Parameters: ");
+  for (uint8_t i = 0; i < PARAM_LENGTH; i++)
+  {
+    MY_SERIAL.print(PARAM_BASE + i);
+    MY_SERIAL.print("=");
+    MY_SERIAL.print(parameter[i]);
+    MY_SERIAL.print(" ");
+  }
+  MY_SERIAL.println();
 }
 
 
 void printMeterData(MeterData_T* md_p)
 {
-  Serial.print("Meter data: ticks=");
-  Serial.print(md_p->ticks);
-  Serial.print(", crc=");
+  MY_SERIAL.print("Meter data: ticks=");
+  MY_SERIAL.print(md_p->ticks);
+  MY_SERIAL.print(", crc=");
   printHex(&md_p->crc8, 1);
-  Serial.println();
+  MY_SERIAL.println();
 }
 
 
 void printWaterMeter(uint32_t ticks)
 {
-  Serial.print("Water meter: ");
-  Serial.print(ticks * TICK_VALUE);
-  Serial.println(" l");
+  MY_SERIAL.print("Water meter: ");
+  MY_SERIAL.print(ticks * TICK_VALUE);
+  MY_SERIAL.println(" l");
 }
 
 
 void printWaterFlow(uint16_t flow_lph)
 {
-  Serial.print("Water flow: ");
-  Serial.print(flow_lph);
-  Serial.println(" l/h");
+  MY_SERIAL.print("Water flow: ");
+  MY_SERIAL.print(flow_lph);
+  MY_SERIAL.println(" l/h");
 }
 
 
@@ -524,10 +624,10 @@ void printHex(uint8_t* data_p, size_t length)
   {
     if (data_p[i] < 0x10)
     {
-      Serial.print('0');
+      MY_SERIAL.print('0');
     }
-    Serial.print(data_p[i], HEX);
-    Serial.print(' ');
+    MY_SERIAL.print(data_p[i], HEX);
+    MY_SERIAL.print(' ');
   }
 }
 
@@ -537,9 +637,13 @@ void printHex(uint8_t* data_p, size_t length)
 // -----------------------------------------------------------------------------
 void resetWaterMeter(void)
 {
-  Sensor_setValueU(&sensor_meter, 0);
-  updateMeterData(0);
-  Serial.println("Meter was reset");
+  uint32_t resetValue = (uint32_t)parameter[PARAM_METER_SET_VALUE_HIGH] << 16;
+  resetValue |= (uint32_t)parameter[PARAM_METER_SET_VALUE_LOW];
+
+  Sensor_setValueU(&sensor_meter, resetValue);
+  updateMeterData(resetValue);
+  MY_SERIAL.print("Meter was reset to value ");
+  MY_SERIAL.println(resetValue);
 }
 
 
@@ -568,17 +672,18 @@ void config_parameter_changed(uint8_t param, uint16_t value)
 {
   if (param < PARAM_BASE || param >= (PARAM_BASE + PARAM_LENGTH))
   {
-    Serial.print("ERROR: Invalid parameter number=");
-    Serial.println(param);
+    MY_SERIAL.print("ERROR: Invalid parameter number=");
+    MY_SERIAL.println(param);
     g_error = ERROR_INVALID_PARAMETER_NUMBER;
     return;
   }
 
   parameter[param - PARAM_BASE] = value;
   zunoSaveCFGParam(param, value);
+  parameterCommit();
 
-  Serial.print("INFO: Parameter ");
-  Serial.print(param);
-  Serial.print(" changed to ");
-  Serial.println(value);
+  MY_SERIAL.print("INFO: Parameter ");
+  MY_SERIAL.print(param);
+  MY_SERIAL.print(" changed to ");
+  MY_SERIAL.println(value);
 }

@@ -24,17 +24,22 @@ typedef struct Sensor_s
   uint32_t time_reported_ms;
 } Sensor_T;
 
-bool Sensor_isTimeToMeasure(Sensor_T* sensor_p);
 void Sensor_setMeasured(Sensor_T* sensor_p);
 void Sensor_setMeasuredTime(Sensor_T* sensor_p, uint32_t time_ms);
+
 uint32_t Sensor_getMeasuredTime(Sensor_T* sensor_p);
+
+bool Sensor_isTimeToMeasure(Sensor_T* sensor_p);
 bool Sensor_isReportThresholdReached(Sensor_T* sensor_p);
-void Sensor_sendReport(Sensor_T* sensor_p);
 bool Sensor_isReportIntervalReached(Sensor_T* sensor_p);
 bool Sensor_isReportIntervalMinReached(Sensor_T* sensor_p);
 bool Sensor_isTimeToSendReport(Sensor_T* sensor_p);
+
+void Sensor_sendReport(Sensor_T* sensor_p);
+
 void Sensor_setValueS(Sensor_T* sensor_p, int32_t value);
 void Sensor_setValueU(Sensor_T* sensor_p, uint32_t value);
+
 int16_t Sensor_getValueS16(Sensor_T* sensor_p);
 uint16_t Sensor_getValueU16(Sensor_T* sensor_p);
 int32_t Sensor_getValueS32(Sensor_T* sensor_p);
