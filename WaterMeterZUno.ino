@@ -12,87 +12,65 @@
 #include <ZUNO_DS18B20.h>
 #include "Crc.h"
 #include "Sensor.h"
+#include "limits.h"
+#include "util.h"
 
 
 // -----------------------------------------------------------------------------
 // Defines
 // -----------------------------------------------------------------------------
-#define VERSION "0.01"
-
-// Uncomment to override default parameter values with the values in the defines.
-#define PARAMETER_OVERRIDE
-
-/* Limits of integral types.  */
-/* Minimum of signed integral types.  */
-# define INT8_MIN                (-128)
-# define INT16_MIN                (-32767-1)
-# define INT32_MIN                (-2147483647L-1L)
-/* Maximum of signed integral types.  */
-# define INT8_MAX                (127)
-# define INT16_MAX                (32767)
-# define INT32_MAX                (2147483647L)
-/* Maximum of unsigned integral types.  */
-# define UINT8_MAX                (255)
-# define UINT16_MAX                (65535)
-# define UINT32_MAX                (4294967295UL)
+// Version of this program
+#define VERSION "0.02"
 
 // Z-Uno channels
 #define ZUNO_CHANNEL_WATER_METER 1
 #define ZUNO_CHANNEL_WATER_FLOW 2
 #define ZUNO_CHANNEL_WATER_TEMPERATURE 3
 
-// Pins
+// Pin definitions
 #define PIN_SENSOR 17 // Is also INT0
 #define PIN_DS18B20 11
 
+// Which serial port to use for printing debug info
 #define MY_SERIAL Serial0
 
+// EEPROM address to store meter data and its update interval
 #define EEPROM_ADDR 0x800
 #define EEPROM_UPDATE_INTERVAL_ms  120000
 
-#define TICK_VALUE 1 // How many liters each tick is
+// How many liters each tick is
+#define TICK_VALUE 1
 
-// Minimum time between reports for sensor multilevel
-#define SENSOR_MULTILEVEL_REPORT_INTERVAL_MIN_ms 30000
-
-#define METER_MEASURE_INTERVAL_ms 0 // Interrupt based
-#define METER_REPORT_INTERVAL_ms 30000  // Default 900000
-#define METER_REPORT_INTERVAL_MIN_ms SENSOR_MULTILEVEL_REPORT_INTERVAL_MIN_ms
-#define METER_DIFF_REPORT_l 1 // In liters // TODO: Make this a Z-Wave configurable parameter
-
-#define FLOW_MEASURE_INTERVAL_ms 0 // Interrupt based
-#define FLOW_REPORT_INTERVAL_ms 30000  // Default 900000
-#define FLOW_REPORT_INTERVAL_MIN_ms SENSOR_MULTILEVEL_REPORT_INTERVAL_MIN_ms
-#define FLOW_DIFF_REPORT_lph 1 // In l/h // TODO: Make this a Z-Wave configurable parameter
-
-#define TEMPERATURE_MEASURE_INTERVAL_ms 30000
-#define TEMPERATURE_REPORT_INTERVAL_ms 30000  // Default 900
-#define TEMPERATURE_REPORT_INTERVAL_MIN_ms SENSOR_MULTILEVEL_REPORT_INTERVAL_MIN_ms
-#define TEMPERATURE_DIFF_REPORT_dC 1 // In deci degrees C // TODO: Make this a Z-Wave configurable parameter
+// Minimum time between sending reports
+#define REPORT_INTERVAL_MIN_s 30
 
 // Parameter default values
 #define PARAM_DEFAULT_METER_REPORT_INTERVAL_s 900
 #define PARAM_DEFAULT_METER_DIFF_REPORT_l 1
+
+#define PARAM_DEFAULT_FLOW_MEASURE_INTERVAL_s 900
 #define PARAM_DEFAULT_FLOW_REPORT_INTERVAL_s 900
 #define PARAM_DEFAULT_FLOW_DIFF_REPORT_lph 1
-#define PARAM_DEFAULT_TEMPERATURE_MEASURE_INTERVAL_s 60
+
+#define PARAM_DEFAULT_TEMPERATURE_MEASURE_INTERVAL_s 30
 #define PARAM_DEFAULT_TEMPERATURE_REPORT_INTERVAL_s 900
-#define PARAM_DEFAULT_TEMPERATURE_DIFF_REPORT_dC 5
-#define PARAM_DEFAULT_METER_RESET_VALUE_HIGH 0
-#define PARAM_DEFAULT_METER_RESET_VALUE_LOW 0
+#define PARAM_DEFAULT_TEMPERATURE_DIFF_REPORT_dC 2
+
+#define PARAM_DEFAULT_METER_RESET_VALUE_m3 0
+#define PARAM_DEFAULT_METER_RESET_VALUE_l 0
 
 
-#define MS_PER_HOUR 3600000UL
-
-#define DIV_ROUND_CLOSEST(n, d) \
-  ((((n) < 0) ^ ((d) < 0)) ? (((n) - (d) / 2) / (d)) : (((n) + (d) / 2) / (d)))
-
-
+// -----------------------------------------------------------------------------
+// Enum definitions
+// -----------------------------------------------------------------------------
 typedef enum
 {
   ERROR_NONE = 0,
   ERROR_INT_NOT_HANDLED_IN_TIME,
   ERROR_INVALID_PARAMETER_NUMBER,
+  ERROR_NO_TEMP_SENSOR,
+  ERROR_OVERFLOW_FLOW_SENSOR,
+  ERROR_INVALID_TEMPERATURE,
 } Error_E;
 
 
@@ -101,20 +79,21 @@ typedef enum
   PARAM_BASE = 64,
   PARAM_METER_REPORT_INTERVAL_s = 0,
   PARAM_METER_DIFF_REPORT_l,
+  PARAM_FLOW_MEASURE_INTERVAL_s,
   PARAM_FLOW_REPORT_INTERVAL_s,
   PARAM_FLOW_DIFF_REPORT_lph,
   PARAM_TEMPERATURE_MEASURE_INTERVAL_s,
   PARAM_TEMPERATURE_REPORT_INTERVAL_s,
   PARAM_TEMPERATURE_DIFF_REPORT_dC,
-  PARAM_METER_RESET_VALUE_HIGH,
-  PARAM_METER_RESET_VALUE_LOW,
+  PARAM_METER_RESET_VALUE_m3,
+  PARAM_METER_RESET_VALUE_l,
   PARAM_LENGTH,
   PARAM_MAX = 96,
 } Parameter_E;
 
 
 // -----------------------------------------------------------------------------
-// Struct definitions and typedefs
+// Struct definitions
 // -----------------------------------------------------------------------------
 typedef struct MeterData_s
 {
@@ -124,54 +103,54 @@ typedef struct MeterData_s
 
 
 // -----------------------------------------------------------------------------
-// Variables
+// Global variables
 // -----------------------------------------------------------------------------
 // Error handling
 Error_E g_error = ERROR_NONE;
 uint16_t g_error_count = 0;
 
 
-// Water meter
+// Water meter sensor
 uint32_t g_new_pulse_ms = 0;
 bool g_new_meter_data = false;
 bool g_pulse_sensor_triggered = false;
 Sensor_T sensor_meter =
 {
   ZUNO_CHANNEL_WATER_METER,
-  METER_MEASURE_INTERVAL_ms,
-  METER_REPORT_INTERVAL_ms,
-  METER_REPORT_INTERVAL_MIN_ms,
-  { METER_DIFF_REPORT_l },
+  0,
+  PARAM_DEFAULT_METER_REPORT_INTERVAL_s * 1000UL,
+  REPORT_INTERVAL_MIN_s * 1000UL,
+  { PARAM_DEFAULT_METER_DIFF_REPORT_l },
   { 0 } , { 0 },
   0, 0
 };
 
 
-// Water flow
+// Water flow sensor
 Sensor_T sensor_flow =
 {
   ZUNO_CHANNEL_WATER_FLOW,
-  FLOW_MEASURE_INTERVAL_ms,
-  FLOW_REPORT_INTERVAL_ms,
-  FLOW_REPORT_INTERVAL_MIN_ms,
-  { FLOW_DIFF_REPORT_lph },
+  PARAM_DEFAULT_FLOW_MEASURE_INTERVAL_s * 1000UL,
+  PARAM_DEFAULT_FLOW_REPORT_INTERVAL_s * 1000UL,
+  REPORT_INTERVAL_MIN_s * 1000UL,
+  { PARAM_DEFAULT_FLOW_DIFF_REPORT_lph },
   { 0 } , { 0 },
   0, 0
 };
 
 
-// Water temperature
+// Water temperature sensor
 OneWire ow(PIN_DS18B20);
 DS18B20Sensor ds18b20(&ow);
-byte addr1[8] = {0xFF};
+uint8_t g_ds18b20_addr[8] = {0xFF};
 bool g_temperature_sensor_found = false;
 Sensor_T sensor_temperature =
 {
   ZUNO_CHANNEL_WATER_TEMPERATURE,
-  TEMPERATURE_MEASURE_INTERVAL_ms,
-  TEMPERATURE_REPORT_INTERVAL_ms,
-  TEMPERATURE_REPORT_INTERVAL_MIN_ms,
-  { TEMPERATURE_DIFF_REPORT_dC },
+  PARAM_DEFAULT_TEMPERATURE_MEASURE_INTERVAL_s * 1000UL,
+  PARAM_DEFAULT_TEMPERATURE_REPORT_INTERVAL_s * 1000UL,
+  REPORT_INTERVAL_MIN_s * 1000UL,
+  { PARAM_DEFAULT_TEMPERATURE_DIFF_REPORT_dC },
   { 0 } , { 0 },
   0, 0
 };
@@ -182,26 +161,27 @@ uint32_t g_last_update_ms = 0;
 
 
 // Parameters
-uint16_t parameter[PARAM_LENGTH];
-const uint16_t parameter_default[PARAM_LENGTH] =
+uint16_t parameter[PARAM_LENGTH] =
 {
   PARAM_DEFAULT_METER_REPORT_INTERVAL_s,
   PARAM_DEFAULT_METER_DIFF_REPORT_l,
+  PARAM_DEFAULT_FLOW_MEASURE_INTERVAL_s,
   PARAM_DEFAULT_FLOW_REPORT_INTERVAL_s,
   PARAM_DEFAULT_FLOW_DIFF_REPORT_lph,
   PARAM_DEFAULT_TEMPERATURE_MEASURE_INTERVAL_s,
   PARAM_DEFAULT_TEMPERATURE_REPORT_INTERVAL_s,
   PARAM_DEFAULT_TEMPERATURE_DIFF_REPORT_dC,
-  PARAM_DEFAULT_METER_RESET_VALUE_HIGH,
-  PARAM_DEFAULT_METER_RESET_VALUE_LOW,
+  PARAM_DEFAULT_METER_RESET_VALUE_m3,
+  PARAM_DEFAULT_METER_RESET_VALUE_l,
 };
+
 
 // -----------------------------------------------------------------------------
 // Z-Uno configuration
 // -----------------------------------------------------------------------------
 //ZUNO_SETUP_PRODUCT_ID(0xAA, 0xBB); // To set 0x0111 / 0xAABB
 
-ZUNO_SETUP_DEBUG_MODE(DEBUG_ON);
+//ZUNO_SETUP_DEBUG_MODE(DEBUG_ON);
 ZUNO_SETUP_SLEEPING_MODE(ZUNO_SLEEPING_MODE_ALWAYS_AWAKE);
 ZUNO_SETUP_ISR_INT0(int0_handler);
 ZUNO_SETUP_CFGPARAMETER_HANDLER(config_parameter_changed);
@@ -259,9 +239,7 @@ void int0_handler()
 // -----------------------------------------------------------------------------
 void setup()
 {
-  // Setup serial port. Wait for input in 10 seconds.
   MY_SERIAL.begin(115200);
-  delay(10000);
 
   parameterSetup();
   meterSetup();
@@ -278,25 +256,18 @@ void setup()
 // Setup functions
 // -----------------------------------------------------------------------------
 /*
- * Load all Z-Wave device parameters from EEPROM if in network else load
- * from default values and also save in EEPROM.
+ * If not in Z-wave network overwrite parameters in EEPROM with default values.
+ * Load all parameters from EEPROM then commit them onto the sensors.
  */
 void parameterSetup(void)
 {
-  bool inNetwork = zunoInNetwork();
-  
-  if (inNetwork)
+  if (!zunoInNetwork())
   {
-    parameterLoad();
-  }
-  else
-  {
-    parameterSetDefault();
+    parameterSave();
   }
 
-#ifndef PARAMETER_OVERRIDE
+  parameterLoad();
   parameterCommit();
-#endif
 }
 
 
@@ -313,13 +284,12 @@ void parameterLoad(void)
 
 
 /*
- * Set all parameter values to default and also save in EEPROM.
+ * Save all parameter values in EEPROM.
  */
-void parameterSetDefault(void)
+void parameterSave(void)
 {
   for (uint8_t i = 0; i < PARAM_LENGTH; i++)
   {
-    parameter[i] = parameter_default[i];
     zunoSaveCFGParam(PARAM_BASE + i, parameter[i]);
   }
 }
@@ -330,14 +300,15 @@ void parameterSetDefault(void)
  */
 void parameterCommit(void)
 {
-  sensor_meter.report_interval_ms = parameter[PARAM_METER_REPORT_INTERVAL_s] * 1000;
+  sensor_meter.report_interval_ms = parameter[PARAM_METER_REPORT_INTERVAL_s] * 1000UL;
   sensor_meter.report_threshold.u16 = parameter[PARAM_METER_DIFF_REPORT_l];
 
-  sensor_flow.report_interval_ms = parameter[PARAM_FLOW_REPORT_INTERVAL_s] * 1000;
+  sensor_flow.measure_interval_ms = parameter[PARAM_FLOW_MEASURE_INTERVAL_s] * 1000UL;
+  sensor_flow.report_interval_ms = parameter[PARAM_FLOW_REPORT_INTERVAL_s] * 1000UL;
   sensor_flow.report_threshold.u16 = parameter[PARAM_FLOW_DIFF_REPORT_lph];
 
-  sensor_temperature.measure_interval_ms = parameter[PARAM_TEMPERATURE_MEASURE_INTERVAL_s] * 1000;
-  sensor_temperature.report_interval_ms = parameter[PARAM_TEMPERATURE_REPORT_INTERVAL_s] * 1000;
+  sensor_temperature.measure_interval_ms = parameter[PARAM_TEMPERATURE_MEASURE_INTERVAL_s] * 1000UL;
+  sensor_temperature.report_interval_ms = parameter[PARAM_TEMPERATURE_REPORT_INTERVAL_s] * 1000UL;
   sensor_temperature.report_threshold.u16 = parameter[PARAM_TEMPERATURE_DIFF_REPORT_dC];
 }
 
@@ -373,7 +344,12 @@ void meterSetup(void)
  */
 void temperatureSetup(void)
 {
-  g_temperature_sensor_found = ds18b20.scanAloneSensor(addr1) == 1;
+  g_temperature_sensor_found = ds18b20.scanAloneSensor(g_ds18b20_addr) == 1;
+
+  if (!g_temperature_sensor_found)
+  {
+    g_error = ERROR_NO_TEMP_SENSOR;
+  }
 }
 
 
@@ -389,7 +365,7 @@ void loop()
     uint32_t new_pulse_ms = g_new_pulse_ms;
     g_pulse_sensor_triggered = false;
 
-    flowCheck(new_pulse_ms);
+    flowCheck(new_pulse_ms, Sensor_getMeasuredTime(&sensor_meter));
     meterCheck(new_pulse_ms);
 
     printWaterMeter(Sensor_getValueU32(&sensor_meter));
@@ -399,7 +375,7 @@ void loop()
   }
   else
   {
-    flowDecay();
+    flowFade(Sensor_getMeasuredTime(&sensor_meter));
   }
 
   if (g_temperature_sensor_found)
@@ -414,19 +390,25 @@ void loop()
 
   if (Sensor_isTimeToSendReport(&sensor_meter))
   {
-    MY_SERIAL.println("Sending water meter report");
+    MY_SERIAL.println(millis());
+    MY_SERIAL.print(" Sending water meter report: ");
+    printWaterMeter(Sensor_getValueU32(&sensor_meter));
     Sensor_sendReport(&sensor_meter);
   }
 
   if (Sensor_isTimeToSendReport(&sensor_flow))
   {
-    MY_SERIAL.println("Sending water flow report");
+    MY_SERIAL.print(millis());
+    MY_SERIAL.print(" Sending water flow report: ");
+    printWaterFlow(Sensor_getValueU16(&sensor_flow));
     Sensor_sendReport(&sensor_flow);
   }
 
   if (Sensor_isTimeToSendReport(&sensor_temperature))
   {
-    MY_SERIAL.println("Sending water temperature report");
+    MY_SERIAL.print(millis());
+    MY_SERIAL.print(" Sending water temperature report: ");
+    printTemperature(Sensor_getValueS16(&sensor_temperature));
     Sensor_sendReport(&sensor_temperature);
   }
 }
@@ -445,6 +427,18 @@ void errorCheck(void)
 
     case ERROR_INVALID_PARAMETER_NUMBER:
       MY_SERIAL.println("ERROR: Invalid parameter number.");
+      break;
+
+    case ERROR_NO_TEMP_SENSOR:
+      MY_SERIAL.println("ERROR: DS18B20 temp sensor not found.");
+      break;
+
+    case ERROR_OVERFLOW_FLOW_SENSOR:
+      MY_SERIAL.println("ERROR: Overflow value on flow sensor.");
+      break;
+
+    case ERROR_INVALID_TEMPERATURE:
+      MY_SERIAL.println("ERROR: Invalid temperature");
       break;
 
     default:
@@ -470,24 +464,37 @@ void meterCheck(uint32_t new_pulse_ms)
 }
 
 
-void flowCheck(uint32_t new_pulse_ms)
+void flowCheck(uint32_t new_pulse_ms, uint32_t last_pulse_ms)
 {
-  uint32_t last_pulse_ms = Sensor_getMeasuredTime(&sensor_flow);
   uint16_t flow_lph = flowMeasure(new_pulse_ms, last_pulse_ms);
-  Sensor_setValueU(&sensor_flow, flow_lph);
-  Sensor_setMeasuredTime(&sensor_flow, new_pulse_ms);
+  if (flow_lph < UINT16_MAX)
+  {
+    Sensor_setValueU(&sensor_flow, flow_lph);
+    Sensor_setMeasuredTime(&sensor_flow, new_pulse_ms);
+  }
+  else
+  {
+    g_error = ERROR_OVERFLOW_FLOW_SENSOR;
+  }
 }
 
 
-void flowDecay(void)
+/*
+ * If time since last pulse is larger than time between last two pulses, 
+ * start fading the flow value towards zero.
+ */
+void flowFade(uint32_t last_pulse_ms)
 {
-  uint32_t now_ms = millis();
-  uint32_t last_pulse_ms = Sensor_getMeasuredTime(&sensor_flow);
-  uint16_t flow_lph = flowMeasure(now_ms, last_pulse_ms);
-  if (flow_lph < Sensor_getValueU16(&sensor_flow))
+  if (Sensor_isTimeToMeasure(&sensor_flow))
   {
-    Sensor_setValueU(&sensor_flow, flow_lph);
-    printWaterFlow(Sensor_getValueU16(&sensor_flow));
+    uint32_t now_ms = millis();
+    uint16_t flow_lph = flowMeasure(now_ms, last_pulse_ms);
+    if (flow_lph < Sensor_getValueU16(&sensor_flow))
+    {
+      Sensor_setValueU(&sensor_flow, flow_lph);
+      Sensor_setMeasuredTime(&sensor_flow, now_ms);
+      printWaterFlow(Sensor_getValueU16(&sensor_flow));
+    }
   }
 }
 
@@ -503,12 +510,11 @@ void temperatureCheck(void)
 
     if (tempC10 == BAD_TEMP)
     {
-      MY_SERIAL.println("ERROR: Invalid temperature");
+      g_error = ERROR_INVALID_TEMPERATURE;
     }
     else
     {
-      MY_SERIAL.print("TempC10: ");
-      MY_SERIAL.println(tempC10);
+      printTemperature(tempC10);
     }
   }
 }
@@ -543,7 +549,7 @@ uint16_t flowMeasure(uint32_t new_time, uint32_t last_time)
 int16_t temperatureMeasure(void)
 {
   int16_t tempC10;
-  int16_t tempC100 = ds18b20.getTempC100(addr1);
+  int16_t tempC100 = ds18b20.getTempC100(g_ds18b20_addr);
   if (tempC100 == BAD_TEMP)
   {
     tempC10 = BAD_TEMP;
@@ -620,12 +626,8 @@ void printTempSensorAddress(void)
   if (g_temperature_sensor_found)
   {
     MY_SERIAL.print("DS18B20 address: ");
-    printHex(addr1, sizeof(addr1));
+    printHex(g_ds18b20_addr, sizeof(g_ds18b20_addr));
     MY_SERIAL.println();
-  }
-  else
-  {
-    MY_SERIAL.println("ERROR: DS18B20 sensor not found");
   }
 }
 
@@ -656,9 +658,21 @@ void printMeterData(MeterData_T* md_p)
 
 void printWaterMeter(uint32_t ticks)
 {
+  uint32_t total_ticks = ticks * TICK_VALUE;
+  uint16_t liters = total_ticks % 1000;
   MY_SERIAL.print("Water meter: ");
-  MY_SERIAL.print(ticks * TICK_VALUE);
-  MY_SERIAL.println(" l");
+  MY_SERIAL.print(total_ticks / 1000);
+  MY_SERIAL.print('.');
+  if (liters < 100)
+  {
+    MY_SERIAL.print('0');
+  }
+  if (liters < 10)
+  {
+    MY_SERIAL.print('0');
+  }
+  MY_SERIAL.print(liters);
+  MY_SERIAL.println(" m³");
 }
 
 
@@ -667,6 +681,16 @@ void printWaterFlow(uint16_t flow_lph)
   MY_SERIAL.print("Water flow: ");
   MY_SERIAL.print(flow_lph);
   MY_SERIAL.println(" l/h");
+}
+
+
+void printTemperature(int16_t temp_dC)
+{
+  MY_SERIAL.print("Temperature: ");
+  MY_SERIAL.print(temp_dC / 10);
+  MY_SERIAL.print('.');
+  MY_SERIAL.print(temp_dC % 10);
+  MY_SERIAL.println(" °C");
 }
 
 
@@ -692,8 +716,8 @@ void printHex(uint8_t* data_p, size_t length)
 // -----------------------------------------------------------------------------
 void resetWaterMeter(void)
 {
-  uint32_t resetValue = (uint32_t)parameter[PARAM_METER_RESET_VALUE_HIGH] << 16;
-  resetValue |= (uint32_t)parameter[PARAM_METER_RESET_VALUE_LOW];
+  uint32_t resetValue = parameter[PARAM_METER_RESET_VALUE_m3] * 1000UL;
+  resetValue += parameter[PARAM_METER_RESET_VALUE_l];
 
   Sensor_setValueU(&sensor_meter, resetValue);
   updateMeterData(resetValue);
