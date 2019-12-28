@@ -1,4 +1,5 @@
 #include "Sensor.h"
+#include "util.h"
 
 
 bool Sensor_isTimeToMeasure(Sensor_T* sensor_p)
@@ -13,13 +14,13 @@ bool Sensor_isTimeToMeasure(Sensor_T* sensor_p)
     return true;
   }
 
-  return (millis() - sensor_p->time_measured_ms) >= sensor_p->measure_interval_ms;
+  return (my_millis() - sensor_p->time_measured_ms) >= sensor_p->measure_interval_ms;
 }
 
 
 void Sensor_setMeasured(Sensor_T* sensor_p)
 {
-  sensor_p->time_measured_ms = millis();
+  sensor_p->time_measured_ms = my_millis();
 }
 
 
@@ -46,7 +47,7 @@ bool Sensor_isReportThresholdReached(Sensor_T* sensor_p)
 void Sensor_sendReport(Sensor_T* sensor_p)
 {
   sensor_p->value_reported.s32 = sensor_p->value.s32;
-  sensor_p->time_reported_ms = millis();
+  sensor_p->time_reported_ms = my_millis();
   zunoSendReport(sensor_p->zuno_channel);
 }
 
@@ -58,14 +59,14 @@ bool Sensor_isReportIntervalReached(Sensor_T* sensor_p)
     return false;
   }
 
-  return (millis() - sensor_p->time_reported_ms) >=
+  return (my_millis() - sensor_p->time_reported_ms) >=
     sensor_p->report_interval_ms;
 }
 
 
 bool Sensor_isReportIntervalMinReached(Sensor_T* sensor_p)
 {
-  return (millis() - sensor_p->time_reported_ms) >=
+  return (my_millis() - sensor_p->time_reported_ms) >=
     sensor_p->report_interval_min_ms;
 }
 

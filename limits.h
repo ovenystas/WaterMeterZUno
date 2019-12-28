@@ -1,3 +1,5 @@
+#pragma once
+
 /* Limits of integral types.  */
 /* Minimum of signed integral types.  */
 # define INT8_MIN                (-128)

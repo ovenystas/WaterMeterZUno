@@ -14,6 +14,7 @@
 #include "Sensor.h"
 #include "limits.h"
 #include "util.h"
+#include "log.h"
 
 
 // -----------------------------------------------------------------------------
@@ -184,6 +185,7 @@ uint16_t parameter[PARAM_LENGTH] =
 //ZUNO_SETUP_DEBUG_MODE(DEBUG_ON);
 ZUNO_SETUP_SLEEPING_MODE(ZUNO_SLEEPING_MODE_ALWAYS_AWAKE);
 ZUNO_SETUP_ISR_INT0(int0_handler);
+ZUNO_SETUP_ISR_1MSTIMER(int_1ms_handler);
 ZUNO_SETUP_CFGPARAMETER_HANDLER(config_parameter_changed);
 
 // Sensor multilevel type for water flow is not yet defined in Z-uno but defined
@@ -225,12 +227,19 @@ ZUNO_SETUP_CHANNELS(
 // -----------------------------------------------------------------------------
 void int0_handler()
 {
-  g_new_pulse_ms = millis();
+  g_new_pulse_ms = my_millis();
   if (g_pulse_sensor_triggered)
   {
     g_error = ERROR_INT_NOT_HANDLED_IN_TIME;
   }
   g_pulse_sensor_triggered = true;
+}
+
+// Workaround for broken mills() function in Z-Uno 2.1.5
+// Function my_millis() in util.h replaces millis()
+void int_1ms_handler()
+{
+  g_my_millis++;
 }
 
 
@@ -242,13 +251,29 @@ void setup()
   MY_SERIAL.begin(115200);
 
   parameterSetup();
-  meterSetup();
-  temperatureSetup();
+  delay(10);
 
+  meterSetup();
+  delay(10);
+
+  temperatureSetup();
+  delay(10);
+
+  log_begin();
   printVersion();
+  delay(10);
+
+  log_begin();
   printNodeId();
+  delay(10);
+
+  log_begin();
   printTempSensorAddress();
+  delay(10);
+
+  log_begin();
   printParameters();
+  delay(10);
 }
 
 
@@ -326,12 +351,14 @@ void meterSetup(void)
   // Get last meter values from EEPROM
   MeterData_T meter_data;
   EEPROM.get(EEPROM_ADDR, &meter_data, sizeof(meter_data));
+  log_begin();
   printMeterData(&meter_data);
 
   // Check data  
   if (crc_calc((uint8_t*)&meter_data.ticks, sizeof(meter_data) - 1) != meter_data.crc8)
   {
     // Invalid data - reset all
+    log_begin();
     MY_SERIAL.println("Bad eeprom crc8 - init meter data");
     updateMeterData(0);
   }
@@ -368,49 +395,83 @@ void loop()
     flowCheck(new_pulse_ms, Sensor_getMeasuredTime(&sensor_meter));
     meterCheck(new_pulse_ms);
 
+    log_begin();
     printWaterMeter(Sensor_getValueU32(&sensor_meter));
+
+    log_begin();
     printWaterFlow(Sensor_getValueU16(&sensor_flow));
 
     g_new_meter_data = true;
+    delay(10);
   }
   else
   {
     flowFade(Sensor_getMeasuredTime(&sensor_meter));
+    delay(10);
   }
 
   if (g_temperature_sensor_found)
   {
     temperatureCheck();
+    delay(10);
   }
 
   if (g_new_meter_data)
   {
     eepromUpdateCheck();
+    delay(10);
   }
 
   if (Sensor_isTimeToSendReport(&sensor_meter))
   {
-    MY_SERIAL.println(millis());
-    MY_SERIAL.print(" Sending water meter report: ");
+    log_begin();
+    MY_SERIAL.print("Reporting ");
     printWaterMeter(Sensor_getValueU32(&sensor_meter));
     Sensor_sendReport(&sensor_meter);
+    delay(10);
   }
 
   if (Sensor_isTimeToSendReport(&sensor_flow))
   {
-    MY_SERIAL.print(millis());
-    MY_SERIAL.print(" Sending water flow report: ");
+    log_begin();
+    MY_SERIAL.print("Reporting ");
     printWaterFlow(Sensor_getValueU16(&sensor_flow));
     Sensor_sendReport(&sensor_flow);
+    delay(10);
   }
 
   if (Sensor_isTimeToSendReport(&sensor_temperature))
   {
-    MY_SERIAL.print(millis());
-    MY_SERIAL.print(" Sending water temperature report: ");
+    log_begin();
+    MY_SERIAL.print("Reporting ");
     printTemperature(Sensor_getValueS16(&sensor_temperature));
     Sensor_sendReport(&sensor_temperature);
+    delay(10);
   }
+
+  // millis() debug code
+  static uint32_t last_millis = 0;
+
+  uint32_t new_millis = my_millis();
+
+  if (new_millis < last_millis)
+  {
+    log_begin();
+    if (last_millis > 0xFFFF0000UL && new_millis < 0x10000UL)
+    {
+      MY_SERIAL.print("WARN: millis wrap-around");
+    }
+    else
+    {
+      MY_SERIAL.print("ERROR: ");
+      MY_SERIAL.print(new_millis);
+      MY_SERIAL.print(' ');
+      MY_SERIAL.println(last_millis);
+    }
+    delay(10);
+  }
+
+  last_millis = new_millis;
 }
 
 
@@ -419,35 +480,42 @@ void loop()
 // -----------------------------------------------------------------------------
 void errorCheck(void)
 {
-  switch (g_error)
+  if (g_error != ERROR_NONE)
   {
-    case ERROR_INT_NOT_HANDLED_IN_TIME:
-      MY_SERIAL.println("ERROR: Interrupt not handled in time.");
-      break;
+    log_begin();
 
-    case ERROR_INVALID_PARAMETER_NUMBER:
-      MY_SERIAL.println("ERROR: Invalid parameter number.");
-      break;
-
-    case ERROR_NO_TEMP_SENSOR:
-      MY_SERIAL.println("ERROR: DS18B20 temp sensor not found.");
-      break;
-
-    case ERROR_OVERFLOW_FLOW_SENSOR:
-      MY_SERIAL.println("ERROR: Overflow value on flow sensor.");
-      break;
-
-    case ERROR_INVALID_TEMPERATURE:
-      MY_SERIAL.println("ERROR: Invalid temperature");
-      break;
-
-    default:
-      break;
+    switch (g_error)
+    {
+      case ERROR_INT_NOT_HANDLED_IN_TIME:
+        MY_SERIAL.println("ERROR: Interrupt not handled in time.");
+        break;
+  
+      case ERROR_INVALID_PARAMETER_NUMBER:
+        MY_SERIAL.println("ERROR: Invalid parameter number.");
+        break;
+  
+      case ERROR_NO_TEMP_SENSOR:
+        MY_SERIAL.println("ERROR: DS18B20 temp sensor not found.");
+        break;
+  
+      case ERROR_OVERFLOW_FLOW_SENSOR:
+        MY_SERIAL.println("ERROR: Overflow value on flow sensor.");
+        break;
+  
+      case ERROR_INVALID_TEMPERATURE:
+        MY_SERIAL.println("ERROR: Invalid temperature");
+        break;
+  
+      default:
+        MY_SERIAL.println("ERROR: Unknown error");
+        break;
+    }
   }
   
   if (g_error != ERROR_NONE)
   {
     ++g_error_count;
+    log_begin();
     MY_SERIAL.print("INFO: Total number of errors: ");
     MY_SERIAL.println(g_error_count);
     g_error = ERROR_NONE;
@@ -487,12 +555,13 @@ void flowFade(uint32_t last_pulse_ms)
 {
   if (Sensor_isTimeToMeasure(&sensor_flow))
   {
-    uint32_t now_ms = millis();
+    uint32_t now_ms = my_millis();
     uint16_t flow_lph = flowMeasure(now_ms, last_pulse_ms);
     if (flow_lph < Sensor_getValueU16(&sensor_flow))
     {
       Sensor_setValueU(&sensor_flow, flow_lph);
       Sensor_setMeasuredTime(&sensor_flow, now_ms);
+      log_begin();
       printWaterFlow(Sensor_getValueU16(&sensor_flow));
     }
   }
@@ -514,6 +583,7 @@ void temperatureCheck(void)
     }
     else
     {
+      log_begin();
       printTemperature(tempC10);
     }
   }
@@ -532,7 +602,7 @@ uint16_t flowMeasure(uint32_t new_time, uint32_t last_time)
   // Calculate water flow in l/h
   uint32_t flow_lph = 0;
   
-  if (last_time > 0 && new_time > last_time)
+  if (last_time > 0)
   {
     uint32_t dt_ms = new_time - last_time;
     flow_lph = ((TICK_VALUE * MS_PER_HOUR) / dt_ms);
@@ -569,13 +639,14 @@ void eepromUpdateCheck(void)
 {
   // To save EEPROM from a lot of r/w operation 
   // write it once in EEPROM_UPDATE_INTERVAL_ms if data was updated
-  if ((millis() - g_last_update_ms) > EEPROM_UPDATE_INTERVAL_ms)
+  if ((my_millis() - g_last_update_ms) > EEPROM_UPDATE_INTERVAL_ms)
   {
-    g_last_update_ms =  millis();
+    g_last_update_ms =  my_millis();
     g_new_meter_data = false;
 
     uint32_t ticks = Sensor_getValueU32(&sensor_meter);
     updateMeterData(ticks);
+    log_begin();
     MY_SERIAL.println("EEPROM updated");
   }
 }
@@ -590,6 +661,7 @@ void updateMeterData(uint32_t ticks)
   meter_data.ticks = ticks;
   meter_data.crc8 = crc_calc((uint8_t*)&meter_data.ticks, sizeof(meter_data) - 1);
 
+  log_begin();
   printMeterData(&meter_data);
 
   EEPROM.put(EEPROM_ADDR, &meter_data, sizeof(meter_data));
@@ -626,7 +698,7 @@ void printTempSensorAddress(void)
   if (g_temperature_sensor_found)
   {
     MY_SERIAL.print("DS18B20 address: ");
-    printHex(g_ds18b20_addr, sizeof(g_ds18b20_addr));
+    MY_SERIAL.dumpPrint(g_ds18b20_addr, sizeof(g_ds18b20_addr));
     MY_SERIAL.println();
   }
 }
@@ -651,7 +723,7 @@ void printMeterData(MeterData_T* md_p)
   MY_SERIAL.print("Meter data: ticks=");
   MY_SERIAL.print(md_p->ticks);
   MY_SERIAL.print(", crc=");
-  printHex(&md_p->crc8, 1);
+  MY_SERIAL.dumpPrint(&md_p->crc8, 1);
   MY_SERIAL.println();
 }
 
@@ -687,27 +759,8 @@ void printWaterFlow(uint16_t flow_lph)
 void printTemperature(int16_t temp_dC)
 {
   MY_SERIAL.print("Temperature: ");
-  MY_SERIAL.print(temp_dC / 10);
-  MY_SERIAL.print('.');
-  MY_SERIAL.print(temp_dC % 10);
+  MY_SERIAL.fixPrint(temp_dC, 1);
   MY_SERIAL.println(" °C");
-}
-
-
-/* 
- * Prints 8-bit data in hex with leading zeroes.
- */
-void printHex(uint8_t* data_p, size_t length)
-{
-  for (size_t i = 0; i < length; i++)
-  {
-    if (data_p[i] < 0x10)
-    {
-      MY_SERIAL.print('0');
-    }
-    MY_SERIAL.print(data_p[i], HEX);
-    MY_SERIAL.print(' ');
-  }
 }
 
 
@@ -721,6 +774,7 @@ void resetWaterMeter(void)
 
   Sensor_setValueU(&sensor_meter, resetValue);
   updateMeterData(resetValue);
+  log_begin();
   MY_SERIAL.print("INFO: Meter was reset to value ");
   MY_SERIAL.println(resetValue);
 }
@@ -751,6 +805,7 @@ void config_parameter_changed(uint8_t param, uint16_t value)
 {
   if (param < PARAM_BASE || param >= (PARAM_BASE + PARAM_LENGTH))
   {
+    log_begin();
     MY_SERIAL.print("ERROR: Invalid parameter number=");
     MY_SERIAL.println(param);
     g_error = ERROR_INVALID_PARAMETER_NUMBER;
@@ -761,6 +816,7 @@ void config_parameter_changed(uint8_t param, uint16_t value)
   zunoSaveCFGParam(param, value);
   parameterCommit();
 
+  log_begin();
   MY_SERIAL.print("INFO: Parameter ");
   MY_SERIAL.print(param);
   MY_SERIAL.print(" changed to ");
